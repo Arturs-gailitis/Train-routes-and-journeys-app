@@ -1735,34 +1735,36 @@ begin
 end;
 /
 
-create or replace PROCEDURE Sadalit_Marsrutus IS
-    i NUMBER := 1000;
-    step NUMBER := 1000;
-    max_route NUMBER;
-    sql_text VARCHAR2(4000);
-    drop_sql VARCHAR2(4000);
+CREATE OR REPLACE PROCEDURE IZVEIDOT_KOPSAVILKUMU AS
 BEGIN
-    SELECT MAX(ROUTE_ID) INTO max_route FROM MARŠRUTI;
-    WHILE i <= max_route LOOP
-        drop_sql := 'BEGIN ' ||
-                    '  EXECUTE IMMEDIATE ''DROP TABLE "MARŠRUTI_AR_' || i || '_ID"''; ' ||
-                    'EXCEPTION ' ||
-                    '  WHEN OTHERS THEN ' ||
-                    '    IF SQLCODE != -942 THEN RAISE; END IF; ' ||
-                    'END;';
-        EXECUTE IMMEDIATE drop_sql;
-        sql_text := 'CREATE TABLE "MARŠRUTI_AR_' || i || '_ID" AS ' ||
-                    'SELECT * FROM MARŠRUTI WHERE ROUTE_ID BETWEEN ' || i || ' AND ' || (i + step - 1);
-        EXECUTE IMMEDIATE sql_text;
-        i := i + step;
-    END LOOP;
-END Sadalit_Marsrutus;
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE MARŠRUTU_KOPSAVILKUMS';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN
+                RAISE;
+            END IF;
+    END;
+
+    EXECUTE IMMEDIATE '
+        CREATE TABLE MARŠRUTU_KOPSAVILKUMS AS
+        SELECT *
+        FROM (
+            SELECT * FROM MARŠRUTI
+            ORDER BY NLSSORT(ROUTE_LONG_NAME, ''NLS_SORT=LATVIAN'')
+        )
+    ';
+END;
 /
 
 BEGIN
-    Sadalit_Marsrutus;
+    IZVEIDOT_KOPSAVILKUMU;
 END;
 /
+
+ALTER TABLE MARŠRUTU_KOPSAVILKUMS
+ADD CONSTRAINT MARŠRUTU_KOPSAVILKUMS_F_CON
+FOREIGN KEY (ROUTE_ID) REFERENCES MARŠRUTI (ROUTE_ID);
 
 create or replace PROCEDURE dienu_skaitu_saskaitisana AS
     TYPE dienas_tips IS TABLE OF VARCHAR2(20);
@@ -1799,3 +1801,115 @@ BEGIN
     dienu_skaitu_saskaitisana;
 END;
 /
+
+CREATE SEQUENCE "Service_SEQ" MINVALUE 1 MAXVALUE 9999999999999999999999999999 START WITH 75663 INCREMENT BY 1 CACHE 20 NOORDER NOCYCLE;
+
+
+CREATE OR REPLACE TRIGGER Service_id_Braucieni_TRG
+BEFORE INSERT ON BRAUCIENI
+FOR EACH ROW
+BEGIN
+  IF :NEW.SERVICE_ID IS NULL THEN
+    SELECT "Service_SEQ".NEXTVAL INTO :NEW.SERVICE_ID FROM dual;
+  END IF;
+END;
+/
+
+CREATE OR REPLACE PROCEDURE PARVEIDOT_BRAUCIENUS AS
+BEGIN
+    BEGIN
+        EXECUTE IMMEDIATE 'DROP TABLE PARVEIDOTI_BRAUCIENI';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLCODE != -942 THEN
+                RAISE;
+            END IF;
+    END;
+
+    EXECUTE IMMEDIATE '
+        CREATE TABLE PARVEIDOTI_BRAUCIENI AS
+        SELECT *
+        FROM (
+            SELECT * FROM BRAUCIENI
+            ORDER BY NLSSORT(TRIP_HEADSIGN, ''NLS_SORT=LATVIAN'')
+        )
+    ';
+END;
+/
+
+BEGIN
+    PARVEIDOT_BRAUCIENUS;
+END;
+/
+
+ALTER TABLE PARVEIDOTI_BRAUCIENI
+ADD CONSTRAINT PARVEIDOTI_BRAUCIENI_F_CON
+FOREIGN KEY (SERVICE_ID) REFERENCES BRAUCIENI (SERVICE_ID);
+
+CREATE OR REPLACE TRIGGER Vecais_Route_id_Trig
+BEFORE INSERT OR UPDATE ON BRAUCIENI
+FOR EACH ROW
+DECLARE
+  v_id MARŠRUTI.ID%TYPE;
+  v_route_id MARŠRUTI.ROUTE_ID%TYPE;
+  v_long_name MARŠRUTI.ROUTE_LONG_NAME%TYPE;
+  v_search_part VARCHAR2(100);
+  v_first_city VARCHAR2(100);
+BEGIN
+  IF :NEW.TRIP_HEADSIGN IS NOT NULL AND 
+     (:NEW.ROUTE_ID IS NULL OR :NEW.TRIP_HEADSIGN != :OLD.TRIP_HEADSIGN OR :NEW.ROUTE_ID != :OLD.ROUTE_ID) THEN
+
+    v_search_part := TRIM(:NEW.TRIP_HEADSIGN);
+
+    IF REGEXP_LIKE(v_search_part, '^\d+$') THEN
+      BEGIN
+        SELECT ID, ROUTE_ID, ROUTE_LONG_NAME INTO v_id, v_route_id, v_long_name
+        FROM MARŠRUTI
+        WHERE ID = TO_NUMBER(v_search_part);
+
+        IF INSTR(v_long_name, ' - ') > 0 THEN
+          v_first_city := INITCAP(TRIM(SUBSTR(v_long_name, 1, INSTR(v_long_name, ' - ') - 1)));
+        ELSE
+          v_first_city := INITCAP(TRIM(v_long_name));
+        END IF;
+
+        :NEW.ROUTE_ID := v_route_id;
+        :NEW.TRIP_HEADSIGN := v_first_city;
+
+      EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+          RAISE_APPLICATION_ERROR(-20001, 'Nav atrasts MARŠRUTI ID ar vērtību: ' || v_search_part);
+      END;
+    ELSE
+      BEGIN
+        SELECT ID, ROUTE_ID, ROUTE_LONG_NAME INTO v_id, v_route_id, v_long_name
+        FROM MARŠRUTI
+        WHERE UPPER(ROUTE_LONG_NAME) LIKE UPPER(v_search_part) || '%'
+        AND ROWNUM = 1;
+
+        IF INSTR(v_long_name, ' - ') > 0 THEN
+          v_first_city := INITCAP(TRIM(SUBSTR(v_long_name, 1, INSTR(v_long_name, ' - ') - 1)));
+        ELSE
+          v_first_city := INITCAP(TRIM(v_long_name));
+        END IF;
+
+        :NEW.ROUTE_ID := v_route_id;
+        :NEW.TRIP_HEADSIGN := v_first_city;
+
+      EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+          RAISE_APPLICATION_ERROR(-20001, 'Nav atrasts maršruts, kas sākas ar: ' || v_search_part);
+      END;
+    END IF;
+
+  ELSE
+    IF :NEW.ROUTE_ID IS NOT NULL THEN
+      BEGIN
+        SELECT 1 INTO v_id FROM MARŠRUTI WHERE ROUTE_ID = :NEW.ROUTE_ID;
+      EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+          RAISE_APPLICATION_ERROR(-20001, 'Ievadītais ROUTE_ID nav derīgs: ' || :NEW.ROUTE_ID);
+      END;
+    END IF;
+  END IF;
+END;
